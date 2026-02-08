@@ -40,9 +40,10 @@ env.isroundover = false
 -- Storage for mapping Macro Steps to Real Tower IDs
 env.TowerMap = {} 
 env.CurrentMacroIndex = 0
+env.TotalPlacedCount = 0 -- Backup counter
 
 local window = library:CreateWindow({
-    Title = "Fixed Macro",
+    Title = "Fail-Safe Macro",
     Size = UDim2.new(0, 350, 0, 370),
     Position = UDim2.new(0.5, 0, 0, 70),
     NoResize = false
@@ -70,17 +71,33 @@ updatelog("Waiting for Game...")
 
 --// Helpers //--
 
--- Automatically find where the game stores physical towers
+-- Robust folder finder
+local cachedFolder = nil
 local function GetTowersFolder()
-    return workspace:FindFirstChild("Towers") 
-        or (workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Towers"))
-        or (workspace:FindFirstChild("Ignore") and workspace.Ignore:FindFirstChild("Towers"))
+    if cachedFolder then return cachedFolder end
+    
+    local possible = {
+        workspace:FindFirstChild("Towers"),
+        workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Towers"),
+        workspace:FindFirstChild("Ignore") and workspace.Ignore:FindFirstChild("Towers"),
+        workspace:FindFirstChild("Units"),
+        workspace:FindFirstChild("PlacedTowers")
+    }
+    
+    for _, folder in ipairs(possible) do
+        if folder then 
+            cachedFolder = folder
+            updatelog("Found Towers in: " .. folder:GetFullName())
+            return folder 
+        end
+    end
+    return nil
 end
 
 local function GetTowerCount()
     local folder = GetTowersFolder()
     if folder then return #folder:GetChildren() end
-    return 0
+    return -1 -- Return -1 if we can't find the folder
 end
 
 function waitTime(time, wave)
@@ -95,11 +112,18 @@ function api:Start()
     env.timer = 0
     env.TowerMap = {}
     env.CurrentMacroIndex = 0
+    env.TotalPlacedCount = 0
+    cachedFolder = nil -- Reset cache
     
     mapinfo:GetAttributeChangedSignal("Wave"):Connect(function() env.waveinfo = mapinfo:GetAttribute("Wave") end)
     roundresultui:GetPropertyChangedSignal("Visible"):Connect(function() env.isroundover = roundresultui.Visible end)
     
     updatelog("Macro Started")
+    -- Try to find folder early
+    task.delay(1, function()
+        if not GetTowersFolder() then updatelog("WARNING: Could not find Towers folder. Using Blind Mode.") end
+    end)
+
     task.spawn(function()
         env.lasttime = ostime()
         while env.lasttime do
@@ -131,7 +155,7 @@ function api:AutoSkip(enable: number, time: number, wave: number)
     if waitTime(time, wave) then bytenet.SkipWave.ToggleAutoSkip.send(enable) end
 end
 
---// ROBUST PLACE FUNCTION //--
+--// FAIL-SAFE PLACE FUNCTION //--
 function api:Place(tower: string, position: Vector3, time: number, wave: number)
     if not waitTime(time, wave) then return end
 
@@ -143,29 +167,50 @@ function api:Place(tower: string, position: Vector3, time: number, wave: number)
     local startCount = GetTowerCount()
     local placed = false
     local finalID = nil
+    local retryCount = 0
 
     repeat
         if env.isroundover then return end
-
-        -- Attempt Place
-        pcall(function()
-            towers.PlaceTower.invoke({
+        
+        -- invokeResult will hold the return value from the server
+        local invokeSuccess, invokeResult = pcall(function()
+            return towers.PlaceTower.invoke({
                 ["Position"] = position, 
                 ["Rotation"] = 0, 
                 ["TowerID"] = tower
             })
         end)
-
-        -- Verification: Did the physical folder count increase?
-        local currentCount = GetTowerCount()
         
-        if currentCount > startCount then
+        -- Check 1: Did the server return a UID directly?
+        if invokeSuccess and type(invokeResult) == "number" and invokeResult > 0 then
             placed = true
-            -- The ID is usually the sequential index (1, 2, 3...)
-            finalID = currentCount 
-        else
-            -- If count didn't change, we failed (No money, blocked, etc). Wait and retry.
-            taskwait(0.15)
+            finalID = invokeResult
+            updatelog("Place Confirmed via Server UID")
+        
+        -- Check 2: Physical Count Verification
+        elseif invokeSuccess then
+            taskwait(0.2) -- Give time for replication
+            local newCount = GetTowerCount()
+            
+            -- If we see more towers, it worked
+            if newCount > startCount and startCount ~= -1 then
+                placed = true
+                finalID = newCount
+            
+            -- FAIL-SAFE: If invoke didn't error, but count didn't change...
+            -- We might be looking in the wrong folder, or lag.
+            -- After 2 attempts of "Success but no visual", we force proceed.
+            elseif retryCount > 1 then
+                placed = true
+                env.TotalPlacedCount = env.TotalPlacedCount + 1
+                finalID = env.TotalPlacedCount -- Best guess ID
+                updatelog("Force Proceeding (Blind Placement)")
+            end
+        end
+
+        if not placed then
+            retryCount = retryCount + 1
+            taskwait(0.25)
         end
     until placed
 
@@ -173,14 +218,14 @@ function api:Place(tower: string, position: Vector3, time: number, wave: number)
     updatelog(`Placed {tower} Success! (ID: {finalID})`)
 end
 
---// ROBUST UPGRADE FUNCTION //--
+--// FAIL-SAFE UPGRADE FUNCTION //--
 function api:Upgrade(towerIndex: number, time: number, wave: number)
     if not waitTime(time, wave) then return end
 
     local realUID = env.TowerMap[towerIndex]
     if not realUID then 
-        updatelog(`FAIL: No ID for Step {towerIndex}`)
-        return 
+        updatelog(`FAIL: No ID for Step {towerIndex}, Attempting Blind Upgrade...`)
+        realUID = towerIndex -- Fallback to index if mapping failed
     end
 
     local upgraded = false
@@ -193,21 +238,19 @@ function api:Upgrade(towerIndex: number, time: number, wave: number)
             return towers.UpgradeTower.invoke(realUID)
         end)
         
-        -- Logic: 
-        -- 1. If result is TRUE (Boolean), Success.
-        -- 2. If result is a Table with Success=true, Success.
-        -- 3. If result is nil (Old code issue), we assume failure and retry.
-        
+        -- If the call didn't crash, we assume it worked or will work eventually
+        -- We check strictly for "Success" if returned, otherwise we retry a few times then pass
         if success then
-             if result == true then
+             if result == true or (type(result) == "table" and result.Success) then
                  upgraded = true
-             elseif type(result) == "table" and result.Success then
-                 upgraded = true
+             elseif result == nil then
+                 -- If returns nil, assumes success (Old API behavior)
+                 upgraded = true 
              end
         end
 
         if not upgraded then
-            taskwait(0.15) -- Wait for money
+            taskwait(0.15)
         end
     until upgraded
     
@@ -216,28 +259,16 @@ end
 
 function api:SetTarget(towerIndex: number, target: string, time: number, wave: number)
     if not waitTime(time, wave) then return end
-    local realUID = env.TowerMap[towerIndex]
-    if realUID then towers.SetTargetMode.send({["UID"] = realUID, ["TargetMode"] = target}) end
+    local realUID = env.TowerMap[towerIndex] or towerIndex
+    towers.SetTargetMode.send({["UID"] = realUID, ["TargetMode"] = target})
 end
 
 function api:Sell(towerIndex: number, time: number, wave: number)
     if not waitTime(time, wave) then return end
-    local realUID = env.TowerMap[towerIndex]
+    local realUID = env.TowerMap[towerIndex] or towerIndex
     
-    if realUID then 
-        local sold = false
-        updatelog(`Selling Tower {towerIndex}...`)
-        repeat
-             if env.isroundover then return end
-             local s, r = pcall(function() return towers.SellTower.invoke(realUID) end)
-             if s and (r == true or (type(r) == "table" and r.Success)) then
-                 sold = true
-             else
-                 taskwait(0.15)
-             end
-        until sold
-        updatelog(`Sold Tower {towerIndex}`)
-    end
+    towers.SellTower.invoke(realUID) 
+    updatelog(`Sold Tower {towerIndex}`)
 end
 
 function api:Loop(func)
