@@ -58,6 +58,7 @@ local ostime = os.time
 local taskwait = task.wait
 local env = getgenv()
 
+-- env defaults
 env.StratName = "Strat"
 env.timer = 0
 env.lasttime = ostime()
@@ -66,6 +67,7 @@ env.isroundover = false
 env.totalplacedtowers = 0
 env.firsttower = 1
 env.destroyui = false
+env.chosenDifficulty = nil -- will be set when difficulty is voted/recorded
 
 local window = library:CreateWindow({
 	Title = "Shitty X",
@@ -105,7 +107,7 @@ end
 window:ShowTab(logtab)
 updatelog("Voting")
 
--- waitTime still available if you want to poll externally, but actions no longer call it.
+-- waitTime polls wave/timer without blocking server RPC retries
 function waitTime(time, wave)
 	while env.waveinfo < wave and not env.isroundover do
 		task.wait(FAST_WAIT)
@@ -124,27 +126,55 @@ function api:Loop(func)
 end
 
 function api:Start()
-	bytenet.Timescale.SetTimescale.send(3)
+	-- speed up local timescale
+	pcall(function() bytenet.Timescale.SetTimescale.send(3) end)
+
 	env.waveinfo = mapinfo:GetAttribute("Wave") or 1
 	env.timer = 0
+
+	-- keep wave info updated
 	mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
 		env.waveinfo = mapinfo:GetAttribute("Wave")
 	end)
+
+	-- detect round end
 	roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
 		env.isroundover = roundresultui.Visible
 	end)
+
 	updatelog("Game Started")
 	task.spawn(function()
 		env.lasttime = ostime()
-		while env.lasttime do
+		while true do
+			if not env.lasttime then break end
 			env.timer = (ostime() - env.lasttime) * 3
 			task.wait(0.25)
 		end
 	end)
 end
 
+-- Helper: wait until RoundInfo difficulty attribute is non-empty (works for string or table)
+local function waitForDifficulty(timeout)
+	local start = tick()
+	while not env.isroundover do
+		local d = mapinfo:GetAttribute("Difficulty")
+		if d ~= nil then
+			local t = type(d)
+			if (t == "string" and d ~= "") or (t == "table" and #d > 0) then
+				return d
+			end
+		end
+		if timeout and (tick() - start) >= timeout then break end
+		task.wait(FAST_WAIT)
+	end
+	return nil
+end
+
 function api:Difficulty(diff)
+	-- diff should be whatever the server expects (string/number). we pass through as-is.
 	updatelog("Voted difficulty " .. tostring(diff))
+
+	-- Keep trying to send vote until RPC succeeds or round ends
 	local attempt = 0
 	while not env.isroundover do
 		attempt = attempt + 1
@@ -157,16 +187,31 @@ function api:Difficulty(diff)
 			task.wait(FAST_WAIT)
 		end
 	end
-	while #mapinfo:GetAttribute("Difficulty") == 0 and not env.isroundover do
-		task.wait(FAST_WAIT)
+
+	-- Wait for the server to reflect the chosen difficulty in RoundInfo
+	local recorded = waitForDifficulty(6) -- 6s timeout fallback
+	if recorded then
+		env.chosenDifficulty = recorded
+		updatelog("Recorded difficulty: " .. tostring(recorded))
+	else
+		-- fallback: read attribute once more; if still empty, record the local diff we sent
+		local final = mapinfo:GetAttribute("Difficulty")
+		if final and ((type(final) == "string" and final ~= "") or (type(final) == "table" and #final > 0)) then
+			env.chosenDifficulty = final
+			updatelog("Recorded difficulty (late): " .. tostring(final))
+		else
+			env.chosenDifficulty = diff
+			updatelog("Difficulty attribute not observed; saved requested diff: " .. tostring(diff))
+		end
 	end
+
+	-- reset timers/wave state for macro playback
 	env.lasttime = ostime()
 	env.timer = 0
 	env.waveinfo = 1
 	task.wait(FAST_WAIT)
 end
 
--- IMPORTANT: actions below NO LONGER block on wave/time. They start immediately and retry until success.
 function api:Ready(time, wave)
 	local attempt = 0
 	while not env.isroundover do
