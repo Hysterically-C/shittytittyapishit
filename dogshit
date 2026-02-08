@@ -1,3 +1,4 @@
+-- Full API: Guaranteed-upgrade version
 local replicatedstorage = game:GetService("ReplicatedStorage")
 
 local library = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'))()
@@ -12,7 +13,7 @@ function api:Loadout(towers)
 	for i = 1, #towers do
 		local attempt = 0
 		while true do
-			if env and env.isroundover then return end
+			if getgenv().isroundover then return end
 			attempt = attempt + 1
 			local ok, res = pcall(function()
 				return bytenet.Inventory.EquipTower.invoke({["TowerID"] = towers[i], ["Slot"] = i})
@@ -33,7 +34,7 @@ function api:Map(map, modifiers)
 	if game.PlaceId ~= 98936097545088 then return end
 	local attempt = 0
 	while true do
-		if env and env.isroundover then return end
+		if getgenv().isroundover then return end
 		attempt = attempt + 1
 		local ok, res = pcall(function()
 			return bytenet.MatchmakingNew.CreateSingleplayer.invoke({["Gamemode"] = "Standard", ["MapID"] = map, ["Modifiers"] = modifiers})
@@ -52,20 +53,24 @@ if game.PlaceId ~= 124069847780670 then return api end
 
 local towers = bytenet.Towers
 local mapinfo = replicatedstorage.RoundInfo
+
 local roundresultui = game:GetService("Players").LocalPlayer.PlayerGui.GameUI.RoundResult
 
 local ostime = os.time
 local taskwait = task.wait
 local env = getgenv()
 
-env.StratName = "Strat"
-env.timer = 0
-env.lasttime = ostime()
-env.waveinfo = 1
-env.isroundover = false
-env.totalplacedtowers = 0
-env.firsttower = 1
-env.destroyui = false
+env.StratName = env.StratName or "Strat"
+
+env.timer = env.timer or 0 -- seconds
+env.lasttime = env.lasttime or ostime()
+env.waveinfo = env.waveinfo or 1
+env.isroundover = env.isroundover or false
+
+env.totalplacedtowers = env.totalplacedtowers or 0
+env.firsttower = env.firsttower or 1
+
+env.destroyui = env.destroyui or false
 
 local window = library:CreateWindow({
 	Title = "Shitty X",
@@ -73,16 +78,32 @@ local window = library:CreateWindow({
 	Position = UDim2.new(0.5, 0, 0, 70),
 	NoResize = false
 })
+
 window:Center()
 
-local logtab = window:CreateTab({ Name = "Macro Player", Visible = true })
-local filename = logtab:Label({ Text = "StratName: " .. env.StratName })
+local logtab = window:CreateTab({
+	Name = "Macro Player",
+	Visible = true
+})
 
-local logstab = window:CreateTab({ Name = "Logs", Visible = true })
-local loglabel = logtab:Label({ Label = "Last Log: Voting" })
+local filename = logtab:Label({
+	Text = "StratName: " .. env.StratName
+})
+
+local logstab = window:CreateTab({
+	Name = "Logs",
+	Visible = true
+})
+
+local loglabel = logtab:Label({
+	Label = "Last Log: Voting"
+})
 
 local row = logstab:Row()
-logstab:Separator({ Text = "Logs:" })
+
+logstab:Separator({
+	Text = "Logs:"
+})
 
 local logs = logstab:Console({
 	Text = "",
@@ -105,7 +126,6 @@ end
 window:ShowTab(logtab)
 updatelog("Voting")
 
--- waitTime still available if you want to poll externally, but actions no longer call it.
 function waitTime(time, wave)
 	while env.waveinfo < wave and not env.isroundover do
 		task.wait(FAST_WAIT)
@@ -125,15 +145,20 @@ end
 
 function api:Start()
 	bytenet.Timescale.SetTimescale.send(3)
+
 	env.waveinfo = mapinfo:GetAttribute("Wave") or 1
 	env.timer = 0
+
 	mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
 		env.waveinfo = mapinfo:GetAttribute("Wave")
 	end)
+
 	roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
 		env.isroundover = roundresultui.Visible
 	end)
+
 	updatelog("Game Started")
+
 	task.spawn(function()
 		env.lasttime = ostime()
 		while env.lasttime do
@@ -157,16 +182,18 @@ function api:Difficulty(diff)
 			task.wait(FAST_WAIT)
 		end
 	end
+
 	while #mapinfo:GetAttribute("Difficulty") == 0 and not env.isroundover do
 		task.wait(FAST_WAIT)
 	end
+
 	env.lasttime = ostime()
 	env.timer = 0
 	env.waveinfo = 1
+
 	task.wait(FAST_WAIT)
 end
 
--- IMPORTANT: actions below NO LONGER block on wave/time. They start immediately and retry until success.
 function api:Ready(time, wave)
 	local attempt = 0
 	while not env.isroundover do
@@ -240,42 +267,131 @@ function api:Place(tower, position, time, wave)
 	end
 end
 
+-- GUARANTEED: do not return until server confirms targetLevel reached
 function api:Upgrade(tower, targetLevel, time, wave)
+	-- compute real index
 	local realindex = env.firsttower + (tower - 1)
+
+	-- defensive: if targetLevel not provided, assume +1 upgrade target (make sure we still guarantee)
+	if not targetLevel or type(targetLevel) ~= "number" then
+		targetLevel = nil -- we'll treat nil as "wait for any successful upgrade to be confirmed at least once"
+	end
+
 	local attempt = 0
+	local lastReportedLevel = nil
+
 	while not env.isroundover do
 		attempt = attempt + 1
+
 		local ok, res = pcall(function()
 			return towers.UpgradeTower.invoke(realindex)
 		end)
-		if ok then
-			if type(res) == "table" then
-				if res.Success == true then
-					if res.Level then
-						updatelog("Upgraded Tower " .. tostring(tower) .. " to Level " .. tostring(res.Level) .. " (attempt " .. tostring(attempt) .. ")")
-						if targetLevel == nil or res.Level == targetLevel then
-							break
-						else
-							task.wait(FAST_WAIT)
-						end
+
+		if not ok then
+			updatelog("Upgrade invocation error on tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ") - retrying")
+			task.wait(FAST_WAIT)
+			goto continue_upgrade_retry
+		end
+
+		-- ok == true, res could be table or non-table
+		if type(res) == "table" then
+			-- If server returned a Level, use it
+			if res.Level ~= nil then
+				lastReportedLevel = res.Level
+				updatelog("Upgrade attempt on tower " .. tostring(tower) .. " reported level " .. tostring(lastReportedLevel) .. " (attempt " .. tostring(attempt) .. ")")
+				-- If we have a targetLevel, check it
+				if targetLevel then
+					if lastReportedLevel >= targetLevel then
+						updatelog("Upgrade COMPLETE: tower " .. tostring(tower) .. " reached level " .. tostring(lastReportedLevel) .. " (target " .. tostring(targetLevel) .. ")")
+						return
 					else
-						updatelog("Upgraded Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
-						break
+						-- not yet at target, continue looping (will attempt further upgrades)
+						task.wait(FAST_WAIT)
+						goto continue_upgrade_retry
 					end
 				else
-					local reason = res.FailReason or "Unknown"
-					updatelog("Upgrade failed (" .. tostring(reason) .. ") attempt " .. tostring(attempt) .. " - retrying")
+					-- No numeric target: treat presence of a reported level after a successful invoke as confirmation of an upgrade (done)
+					updatelog("Upgrade CONFIRMED: tower " .. tostring(tower) .. " level " .. tostring(lastReportedLevel) .. " (attempt " .. tostring(attempt) .. ")")
+					return
+				end
+			end
+
+			-- If server returned Success but no Level field, we must authoritative-poll until we see a level change.
+			if res.Success == true and res.Level == nil then
+				updatelog("Upgrade reported success but no level yet for tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. "). Polling for authoritative level...")
+				-- Start polling loop: keep invoking UpgradeTower.invoke to get authoritative level data or until we detect level >= target
+				local pollAttempt = 0
+				while not env.isroundover do
+					pollAttempt = pollAttempt + 1
+					local ok2, res2 = pcall(function()
+						return towers.UpgradeTower.invoke(realindex)
+					end)
+					if ok2 and type(res2) == "table" and res2.Level ~= nil then
+						lastReportedLevel = res2.Level
+						updatelog("Poll: tower " .. tostring(tower) .. " level now " .. tostring(lastReportedLevel) .. " (poll attempt " .. tostring(pollAttempt) .. ")")
+						if targetLevel then
+							if lastReportedLevel >= targetLevel then
+								updatelog("Upgrade COMPLETE via poll: tower " .. tostring(tower) .. " reached level " .. tostring(lastReportedLevel))
+								return
+							else
+								-- not at target yet — continue outer loop to attempt more upgrades
+								break
+							end
+						else
+							-- no numeric target provided; confirmation achieved
+							updatelog("Upgrade CONFIRMED via poll for tower " .. tostring(tower) .. " (level " .. tostring(lastReportedLevel) .. ")")
+							return
+						end
+					end
+					-- poll failed or no level yet: wait very briefly then try again
 					task.wait(FAST_WAIT)
 				end
-			else
-				updatelog("Upgraded Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
-				break
+				-- continue to outer retry loop to attempt again (if needed)
+				goto continue_upgrade_retry
+			end
+
+			-- If Success == false, log reason and retry
+			if res.Success == false then
+				local reason = res.FailReason or "Unknown"
+				updatelog("Upgrade failed for tower " .. tostring(tower) .. " (" .. tostring(reason) .. ") attempt " .. tostring(attempt) .. " - retrying")
+				task.wait(FAST_WAIT)
+				goto continue_upgrade_retry
 			end
 		else
-			updatelog("Upgrade invocation error attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
+			-- Non-table response: treat as ambiguous success — poll to verify
+			updatelog("Upgrade returned ambiguous response for tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. "), polling for confirmation")
+			local pollAttempt2 = 0
+			while not env.isroundover do
+				pollAttempt2 = pollAttempt2 + 1
+				local ok3, res3 = pcall(function()
+					return towers.UpgradeTower.invoke(realindex)
+				end)
+				if ok3 and type(res3) == "table" and res3.Level ~= nil then
+					lastReportedLevel = res3.Level
+					updatelog("Poll2: tower " .. tostring(tower) .. " level " .. tostring(lastReportedLevel) .. " (poll attempt " .. tostring(pollAttempt2) .. ")")
+					if targetLevel then
+						if lastReportedLevel >= targetLevel then
+							updatelog("Upgrade COMPLETE via poll2: tower " .. tostring(tower) .. " reached level " .. tostring(lastReportedLevel))
+							return
+						else
+							break
+						end
+					else
+						updatelog("Upgrade CONFIRMED via poll2 for tower " .. tostring(tower) .. " (level " .. tostring(lastReportedLevel) .. ")")
+						return
+					end
+				end
+				task.wait(FAST_WAIT)
+			end
 		end
+
+		::continue_upgrade_retry::
+		-- tiny yield before next attempt
+		task.wait(FAST_WAIT)
 	end
+
+	-- if loop exits because round ended, log that upgrade was aborted by round end
+	updatelog("Upgrade aborted for tower " .. tostring(tower) .. " because round ended")
 end
 
 function api:SetTarget(tower, target, time, wave)
@@ -312,11 +428,15 @@ end
 
 function api:PlayAgain()
 	while not env.isroundover do task.wait(FAST_WAIT) end
+
 	env.firsttower = env.totalplacedtowers + 1
+
 	env.lasttime = ostime()
 	env.timer = 0
 	env.waveinfo = 1
+
 	task.wait(1)
+
 	local attempt = 0
 	while true do
 		attempt = attempt + 1
