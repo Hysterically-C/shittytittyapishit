@@ -42,25 +42,24 @@ local logs = logstab:Console({
     ReadOnly = true,
     AutoScroll = true,
     RichText = true,
-    MaxLines = 300
+    MaxLines = 400
 })
 
 local function updatelog(text)
-    setthreadidentity(7)
-    logs:AppendText(DateTime.now():FormatLocalTime("HH:mm:ss", "en-us") .. " | " .. text)
-    statusLabel:SetText("Status: " .. text)
+    pcall(function() setthreadidentity(7) end)
+    local stamp = DateTime.now():FormatLocalTime("HH:mm:ss", "en-us")
+    logs:AppendText(stamp .. " | " .. tostring(text))
+    pcall(function() statusLabel:SetText("Status: " .. tostring(text)) end)
 end
 
-local function debugprint(tag, value)
-    local t = typeof(value)
+local function debugprint(tag, val)
+    local t = typeof(val)
     if t == "table" then
         local keys = {}
-        for k in pairs(value) do
-            keys[#keys+1] = tostring(k)
-        end
-        updatelog(`[DEBUG:{tag}] table -> {{{table.concat(keys,", ")}}}`)
+        for k in pairs(val) do keys[#keys+1] = tostring(k) end
+        updatelog(string.format("[DEBUG:%s] table keys = {%s}", tostring(tag), table.concat(keys, ", ")))
     else
-        updatelog(`[DEBUG:{tag}] {t} -> {tostring(value)}`)
+        updatelog(string.format("[DEBUG:%s] %s -> %s", tostring(tag), t, tostring(val)))
     end
 end
 
@@ -78,8 +77,14 @@ local function GetTowersFolder()
         workspace:FindFirstChild("PlacedTowers")
     }
     for _, f in ipairs(possible) do
-        if f then cachedFolder = f return f end
+        if f then
+            cachedFolder = f
+            updatelog("Found Towers folder: " .. f:GetFullName())
+            return f
+        end
     end
+    updatelog("Towers folder not found")
+    return nil
 end
 
 local function waitTime(time, wave)
@@ -89,7 +94,12 @@ local function waitTime(time, wave)
 end
 
 function api:Start()
-    bytenet.Timescale.SetTimescale.send(3)
+    if towers and towers.SetTimescale and towers.SetTimescale.send then
+        pcall(function() towers.SetTimescale.send(3) end)
+    elseif bytenet.Timescale and bytenet.Timescale.SetTimescale and bytenet.Timescale.SetTimescale.send then
+        pcall(function() bytenet.Timescale.SetTimescale.send(3) end)
+    end
+
     env.waveinfo = mapinfo:GetAttribute("Wave") or 1
     env.timer = 0
     env.TowerMap = {}
@@ -116,12 +126,21 @@ function api:Start()
     updatelog("Macro Started")
 end
 
+-- safe-call helper
+local function safeCall(fn, ...)
+    if type(fn) ~= "function" then
+        return false, ("fn_not_function")
+    end
+    local ok, res = pcall(fn, ...)
+    return ok, res
+end
+
 function api:Place(tower, position, time, wave)
     if not waitTime(time, wave) then return end
 
-    env.CurrentMacroIndex += 1
+    env.CurrentMacroIndex = env.CurrentMacroIndex + 1
     local idx = env.CurrentMacroIndex
-    updatelog(`Placing {tower} (Step {idx})`)
+    updatelog(string.format("Placing %s (Step %d)...", tostring(tower), idx))
 
     local folder = GetTowersFolder()
     local before = {}
@@ -134,89 +153,126 @@ function api:Place(tower, position, time, wave)
 
     repeat
         if env.isroundover then return end
-        local ok, res = pcall(function()
-            return towers.PlaceTower.invoke({
-                Position = position,
-                Rotation = 0,
-                TowerID = tower
-            })
-        end)
+
+        local ok, res = safeCall((towers and towers.PlaceTower and towers.PlaceTower.invoke) or nil, {
+            Position = position,
+            Rotation = 0,
+            TowerID = tower
+        })
 
         debugprint("PlaceReturn", res)
 
         if ok and type(res) == "number" then
             finalUID = res
+            updatelog("Place returned numeric UID: " .. tostring(finalUID))
         elseif ok and type(res) == "table" then
             finalUID = res.UID or res.uid or res.Id or res.ID
+            if finalUID then updatelog("Place returned table UID: " .. tostring(finalUID)) end
         end
 
         if not finalUID and folder then
             taskwait(0.15)
             for _, c in ipairs(folder:GetChildren()) do
                 if not before[c] then
-                    finalUID =
-                        tonumber(c.Name) or
-                        c:GetAttribute("UID") or
-                        (c:FindFirstChild("UID") and c.UID.Value)
-                    break
+                    local found = tonumber(c.Name) or (c.GetAttribute and c:GetAttribute("UID")) or (c:FindFirstChild("UID") and c.UID.Value)
+                    if type(found) == "number" then
+                        finalUID = found
+                        updatelog("Detected new instance in workspace, UID: " .. tostring(finalUID))
+                        break
+                    else
+                        -- if count increased and we couldn't find a UID, accept heuristic
+                        if #folder:GetChildren() > (table.maxn(before) or 0) then
+                            env.TotalPlacedCount = env.TotalPlacedCount + 1
+                            finalUID = env.TotalPlacedCount
+                            updatelog("Heuristic placement: assigned fake UID: " .. tostring(finalUID))
+                            break
+                        end
+                    end
                 end
             end
         end
 
         if not finalUID then
-            tries += 1
-            taskwait(0.2)
+            tries = tries + 1
+            if tries > 4 then
+                env.TotalPlacedCount = env.TotalPlacedCount + 1
+                finalUID = env.TotalPlacedCount
+                updatelog("Blind fallback used, assigned UID: " .. tostring(finalUID))
+                break
+            end
+            taskwait(0.25)
         end
-    until finalUID or tries > 4
-
-    if not finalUID then
-        env.TotalPlacedCount += 1
-        finalUID = env.TotalPlacedCount
-        updatelog("Blind UID fallback used")
-    end
+    until finalUID
 
     env.TowerMap[idx] = finalUID
-    updatelog(`Placed {tower} UID={finalUID}`)
+    updatelog(string.format("Placed %s UID=%s", tostring(tower), tostring(finalUID)))
 end
 
 function api:Upgrade(towerIndex, time, wave)
     if not waitTime(time, wave) then return end
 
     local uid = env.TowerMap[towerIndex] or towerIndex
-    updatelog(`Upgrading UID={uid}`)
+    updatelog("Upgrading UID=" .. tostring(uid))
 
     local attempts = {
-        function() return towers.UpgradeTower.invoke(uid) end,
-        function() return towers.UpgradeTower.invoke({ UID = uid }) end,
-        function() return towers.UpgradeTower.send(uid) end,
-        function() return towers.UpgradeTower.send({ UID = uid }) end
+        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.invoke, arg = uid },
+        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.invoke, arg = { UID = uid } },
+        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.send, arg = uid },
+        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.send, arg = { UID = uid } },
+        -- fallback to bytenet style variations
+        { fn = bytenet and bytenet.UpgradeTower and bytenet.UpgradeTower.invoke, arg = uid },
+        { fn = bytenet and bytenet.UpgradeTower and bytenet.UpgradeTower.invoke, arg = { UID = uid } }
     }
 
-    for i, fn in ipairs(attempts) do
+    for i, at in ipairs(attempts) do
         if env.isroundover then return end
-        local ok, res = pcall(fn)
-        debugprint("UpgradeAttempt"..i, res)
-        if ok and (res == nil or res == true or (type(res)=="table" and res.Success)) then
-            updatelog(`Upgrade Success UID={uid}`)
-            return
+        local fn = at.fn
+        local arg = at.arg
+        if type(fn) ~= "function" then
+            debugprint("UpgradeAttempt"..i, "fn_missing")
+        else
+            local ok, res
+            if type(arg) == "table" then
+                ok, res = safeCall(fn, arg)
+            else
+                ok, res = safeCall(fn, arg)
+            end
+            debugprint("UpgradeAttempt"..i, res)
+            if ok and (res == nil or res == true or (type(res) == "table" and (res.Success == true or res.success == true))) then
+                updatelog("Upgrade Success UID=" .. tostring(uid))
+                return
+            end
         end
         taskwait(0.12)
     end
 
-    updatelog(`Upgrade FAILED UID={uid}`)
+    updatelog("Upgrade FAILED UID=" .. tostring(uid))
 end
 
 function api:SetTarget(towerIndex, target, time, wave)
     if not waitTime(time, wave) then return end
-    towers.SetTargetMode.send({
-        UID = env.TowerMap[towerIndex] or towerIndex,
-        TargetMode = target
-    })
+    local uid = env.TowerMap[towerIndex] or towerIndex
+    local args = { UID = uid, TargetMode = target }
+    if towers and towers.SetTargetMode and towers.SetTargetMode.send then
+        pcall(function() towers.SetTargetMode.send(args) end)
+    elseif towers and towers.SetTargetMode and towers.SetTargetMode.invoke then
+        pcall(function() towers.SetTargetMode.invoke(args) end)
+    else
+        pcall(function() bytenet.Towers.SetTargetMode.send(args) end)
+    end
 end
 
 function api:Sell(towerIndex, time, wave)
     if not waitTime(time, wave) then return end
-    towers.SellTower.invoke(env.TowerMap[towerIndex] or towerIndex)
+    local uid = env.TowerMap[towerIndex] or towerIndex
+    if towers and towers.SellTower and towers.SellTower.invoke then
+        pcall(function() towers.SellTower.invoke(uid) end)
+    elseif towers and towers.SellTower and towers.SellTower.send then
+        pcall(function() towers.SellTower.send(uid) end)
+    else
+        pcall(function() bytenet.Towers.SellTower.invoke(uid) end)
+    end
+    updatelog("Sold UID=" .. tostring(uid))
 end
 
 function api:Loop(func)
@@ -229,7 +285,10 @@ function api:PlayAgain()
     env.timer = 0
     env.waveinfo = 1
     taskwait(1)
-    bytenet.RoundResult.VoteForRestart.send(true)
+    if bytenet and bytenet.RoundResult and bytenet.RoundResult.VoteForRestart and bytenet.RoundResult.VoteForRestart.send then
+        pcall(function() bytenet.RoundResult.VoteForRestart.send(true) end)
+    end
+    updatelog("Restart requested")
 end
 
 return api
