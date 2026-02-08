@@ -1,31 +1,71 @@
--- Full API: Guaranteed-upgrade version with original Difficulty replay restored
 local replicatedstorage = game:GetService("ReplicatedStorage")
 
 local library = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'))()
 local bytenet = require(replicatedstorage:WaitForChild("Teawork"):WaitForChild("Shared"):WaitForChild("Services"):WaitForChild("ByteNetworking"))
 
 local api = {}
+
 local FAST_WAIT = 0.03
+
+function api:Loadout(towers)
+	if game.PlaceId ~= 98936097545088 then return end
+	for i = 1, #towers do
+		local attempt = 0
+		while true do
+			if env and env.isroundover then return end
+			attempt = attempt + 1
+			local ok, res = pcall(function()
+				return bytenet.Inventory.EquipTower.invoke({["TowerID"] = towers[i], ["Slot"] = i})
+			end)
+			if ok then
+				updatelog("Loadout: Equipped " .. tostring(towers[i]) .. " (slot " .. tostring(i) .. ") after " .. tostring(attempt) .. " attempt(s)")
+				break
+			else
+				updatelog("Loadout: Equip failed for " .. tostring(towers[i]) .. " attempt " .. tostring(attempt) .. " - retrying")
+				task.wait(FAST_WAIT)
+			end
+		end
+		task.wait(FAST_WAIT)
+	end
+end
+
+function api:Map(map, modifiers)
+	if game.PlaceId ~= 98936097545088 then return end
+	local attempt = 0
+	while true do
+		if env and env.isroundover then return end
+		attempt = attempt + 1
+		local ok, res = pcall(function()
+			return bytenet.MatchmakingNew.CreateSingleplayer.invoke({["Gamemode"] = "Standard", ["MapID"] = map, ["Modifiers"] = modifiers})
+		end)
+		if ok then
+			updatelog("Map: Created singleplayer match for " .. tostring(map) .. " after " .. tostring(attempt) .. " attempt(s)")
+			break
+		else
+			updatelog("Map: CreateSingleplayer failed attempt " .. tostring(attempt) .. " - retrying")
+			task.wait(FAST_WAIT)
+		end
+	end
+end
 
 if game.PlaceId ~= 124069847780670 then return api end
 
 local towers = bytenet.Towers
 local mapinfo = replicatedstorage.RoundInfo
 local roundresultui = game:GetService("Players").LocalPlayer.PlayerGui.GameUI.RoundResult
+
+local ostime = os.time
+local taskwait = task.wait
 local env = getgenv()
 
-env.totalplacedtowers = env.totalplacedtowers or 0
-env.firsttower = env.firsttower or 1
-env.isroundover = env.isroundover or false
-env.StratName = env.StratName or "Strat"
-env.timer = env.timer or 0
-env.lasttime = env.lasttime or os.time()
-env.waveinfo = env.waveinfo or 1
-env.destroyui = env.destroyui or false
-
-roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
-	env.isroundover = roundresultui.Visible
-end)
+env.StratName = "Strat"
+env.timer = 0
+env.lasttime = ostime()
+env.waveinfo = 1
+env.isroundover = false
+env.totalplacedtowers = 0
+env.firsttower = 1
+env.destroyui = false
 
 local window = library:CreateWindow({
 	Title = "Shitty X",
@@ -65,6 +105,7 @@ end
 window:ShowTab(logtab)
 updatelog("Voting")
 
+-- waitTime still available if you want to poll externally, but actions no longer call it.
 function waitTime(time, wave)
 	while env.waveinfo < wave and not env.isroundover do
 		task.wait(FAST_WAIT)
@@ -84,45 +125,41 @@ end
 
 function api:Start()
 	bytenet.Timescale.SetTimescale.send(3)
-
 	env.waveinfo = mapinfo:GetAttribute("Wave") or 1
 	env.timer = 0
-
 	mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
 		env.waveinfo = mapinfo:GetAttribute("Wave")
 	end)
-
 	roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
 		env.isroundover = roundresultui.Visible
 	end)
-
 	updatelog("Game Started")
-
 	task.spawn(function()
-		env.lasttime = os.time()
+		env.lasttime = ostime()
 		while env.lasttime do
-			env.timer = (os.time() - env.lasttime) * 3
+			env.timer = (ostime() - env.lasttime) * 3
 			task.wait(0.25)
 		end
 	end)
 end
 
--- RESTORED: original difficulty replay behavior (only this function changed)
 function api:Difficulty(diff)
 	updatelog("Voted difficulty " .. tostring(diff))
 	bytenet.DifficultyVote.Vote.send(diff)
 
-	while #mapinfo:GetAttribute("Difficulty") == 0 and not env.isroundover do
+	-- original replay behavior: wait until the server writes the Difficulty attribute
+	while #mapinfo:GetAttribute("Difficulty") == 0 do
 		task.wait(0.05)
 	end
 
-	env.lasttime = os.time()
+	env.lasttime = ostime()
 	env.timer = 0
 	env.waveinfo = 1
 
 	task.wait(0.1)
 end
 
+-- IMPORTANT: actions below NO LONGER block on wave/time. They start immediately and retry until success.
 function api:Ready(time, wave)
 	local attempt = 0
 	while not env.isroundover do
@@ -196,114 +233,42 @@ function api:Place(tower, position, time, wave)
 	end
 end
 
--- GUARANTEED: do not return until server confirms targetLevel reached
 function api:Upgrade(tower, targetLevel, time, wave)
 	local realindex = env.firsttower + (tower - 1)
-
-	if not targetLevel or type(targetLevel) ~= "number" then
-		targetLevel = nil
-	end
-
 	local attempt = 0
-	local lastReportedLevel = nil
-
 	while not env.isroundover do
 		attempt = attempt + 1
-
 		local ok, res = pcall(function()
 			return towers.UpgradeTower.invoke(realindex)
 		end)
-
-		if not ok then
-			updatelog("Upgrade invocation error on tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ") - retrying")
-			task.wait(FAST_WAIT)
-			goto continue_upgrade_retry
-		end
-
-		if type(res) == "table" then
-			if res.Level ~= nil then
-				lastReportedLevel = res.Level
-				updatelog("Upgrade attempt on tower " .. tostring(tower) .. " reported level " .. tostring(lastReportedLevel) .. " (attempt " .. tostring(attempt) .. ")")
-				if targetLevel then
-					if lastReportedLevel >= targetLevel then
-						updatelog("Upgrade COMPLETE: tower " .. tostring(tower) .. " reached level " .. tostring(lastReportedLevel) .. " (target " .. tostring(targetLevel) .. ")")
-						return
+		if ok then
+			if type(res) == "table" then
+				if res.Success == true then
+					if res.Level then
+						updatelog("Upgraded Tower " .. tostring(tower) .. " to Level " .. tostring(res.Level) .. " (attempt " .. tostring(attempt) .. ")")
+						if targetLevel == nil or res.Level == targetLevel then
+							break
+						else
+							task.wait(FAST_WAIT)
+						end
 					else
-						task.wait(FAST_WAIT)
-						goto continue_upgrade_retry
+						updatelog("Upgraded Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
+						break
 					end
 				else
-					updatelog("Upgrade CONFIRMED: tower " .. tostring(tower) .. " level " .. tostring(lastReportedLevel) .. " (attempt " .. tostring(attempt) .. ")")
-					return
-				end
-			end
-
-			if res.Success == true and res.Level == nil then
-				updatelog("Upgrade reported success but no level yet for tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. "). Polling for authoritative level...")
-				local pollAttempt = 0
-				while not env.isroundover do
-					pollAttempt = pollAttempt + 1
-					local ok2, res2 = pcall(function()
-						return towers.UpgradeTower.invoke(realindex)
-					end)
-					if ok2 and type(res2) == "table" and res2.Level ~= nil then
-						lastReportedLevel = res2.Level
-						updatelog("Poll: tower " .. tostring(tower) .. " level now " .. tostring(lastReportedLevel) .. " (poll attempt " .. tostring(pollAttempt) .. ")")
-						if targetLevel then
-							if lastReportedLevel >= targetLevel then
-								updatelog("Upgrade COMPLETE via poll: tower " .. tostring(tower) .. " reached level " .. tostring(lastReportedLevel))
-								return
-							else
-								break
-							end
-						else
-							updatelog("Upgrade CONFIRMED via poll for tower " .. tostring(tower) .. " (level " .. tostring(lastReportedLevel) .. ")")
-							return
-						end
-					end
+					local reason = res.FailReason or "Unknown"
+					updatelog("Upgrade failed (" .. tostring(reason) .. ") attempt " .. tostring(attempt) .. " - retrying")
 					task.wait(FAST_WAIT)
 				end
-				goto continue_upgrade_retry
-			end
-
-			if res.Success == false then
-				local reason = res.FailReason or "Unknown"
-				updatelog("Upgrade failed for tower " .. tostring(tower) .. " (" .. tostring(reason) .. ") attempt " .. tostring(attempt) .. " - retrying")
-				task.wait(FAST_WAIT)
-				goto continue_upgrade_retry
+			else
+				updatelog("Upgraded Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
+				break
 			end
 		else
-			updatelog("Upgrade returned ambiguous response for tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. "), polling for confirmation")
-			local pollAttempt2 = 0
-			while not env.isroundover do
-				pollAttempt2 = pollAttempt2 + 1
-				local ok3, res3 = pcall(function()
-					return towers.UpgradeTower.invoke(realindex)
-				end)
-				if ok3 and type(res3) == "table" and res3.Level ~= nil then
-					lastReportedLevel = res3.Level
-					updatelog("Poll2: tower " .. tostring(tower) .. " level " .. tostring(lastReportedLevel) .. " (poll attempt " .. tostring(pollAttempt2) .. ")")
-					if targetLevel then
-						if lastReportedLevel >= targetLevel then
-							updatelog("Upgrade COMPLETE via poll2: tower " .. tostring(tower) .. " reached level " .. tostring(lastReportedLevel))
-							return
-						else
-							break
-						end
-					else
-						updatelog("Upgrade CONFIRMED via poll2 for tower " .. tostring(tower) .. " (level " .. tostring(lastReportedLevel) .. ")")
-						return
-					end
-				end
-				task.wait(FAST_WAIT)
-			end
+			updatelog("Upgrade invocation error attempt " .. tostring(attempt) .. " - retrying")
+			task.wait(FAST_WAIT)
 		end
-
-		::continue_upgrade_retry::
-		task.wait(FAST_WAIT)
 	end
-
-	updatelog("Upgrade aborted for tower " .. tostring(tower) .. " because round ended")
 end
 
 function api:SetTarget(tower, target, time, wave)
@@ -340,14 +305,11 @@ end
 
 function api:PlayAgain()
 	while not env.isroundover do task.wait(FAST_WAIT) end
-
 	env.firsttower = env.totalplacedtowers + 1
-	env.lasttime = os.time()
+	env.lasttime = ostime()
 	env.timer = 0
 	env.waveinfo = 1
-
 	task.wait(1)
-
 	local attempt = 0
 	while true do
 		attempt = attempt + 1
