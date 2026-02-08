@@ -1,15 +1,31 @@
 local replicatedstorage = game:GetService("ReplicatedStorage")
+
 local library = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'))()
 
-local teamwork = replicatedstorage:WaitForChild("Teawork", 10)
-local bytenet = require(teamwork:WaitForChild("Shared"):WaitForChild("Services"):WaitForChild("ByteNetworking"))
+local bytenet = require(replicatedstorage:WaitForChild("Teawork"):WaitForChild("Shared"):WaitForChild("Services"):WaitForChild("ByteNetworking"))
 
 local api = {}
+
+function api:Loadout(towers: table)
+	if game.PlaceId ~= 98936097545088 then return end
+
+	for i = 1, #towers do
+		bytenet.Inventory.EquipTower.invoke({["TowerID"] = towers[i], ["Slot"] = i})
+		task.wait(0.5)
+	end
+end
+
+function api:Map(map: string, modifiers: table)
+	if game.PlaceId ~= 98936097545088 then return end
+	
+	bytenet.MatchmakingNew.CreateSingleplayer.invoke({["Gamemode"] = "Standard", ["MapID"] = map, ["Modifiers"] = modifiers})
+end
 
 if game.PlaceId ~= 124069847780670 then return api end
 
 local towers = bytenet.Towers
 local mapinfo = replicatedstorage.RoundInfo
+
 local roundresultui = game:GetService("Players").LocalPlayer.PlayerGui.GameUI.RoundResult
 
 local ostime = os.time
@@ -17,278 +33,215 @@ local taskwait = task.wait
 local env = getgenv()
 
 env.StratName = "Strat"
-env.timer = 0
+
+env.timer = 0 -- seconds
 env.lasttime = ostime()
 env.waveinfo = 1
 env.isroundover = false
 
-env.TowerMap = {}
-env.CurrentMacroIndex = 0
-env.TotalPlacedCount = 0
+env.totalplacedtowers = 0
+env.firsttower = 1
+
+env.destroyui = false
 
 local window = library:CreateWindow({
-    Title = "Fail-Safe Macro",
+    Title = "Shitty X",
     Size = UDim2.new(0, 350, 0, 370),
-    Position = UDim2.new(0.5, 0, 0, 70)
+    Position = UDim2.new(0.5, 0, 0, 70),
+    NoResize = false
 })
+
 window:Center()
 
-local logtab = window:CreateTab({ Name = "Macro Player", Visible = true })
-local logstab = window:CreateTab({ Name = "Logs", Visible = true })
-
-local statusLabel = logtab:Label({ Text = "Status: Idle" })
-local logs = logstab:Console({
-    Text = "",
-    ReadOnly = true,
-    AutoScroll = true,
-    RichText = true,
-    MaxLines = 400
+local logtab = window:CreateTab({
+    Name = "Macro Player",
+    Visible = true
 })
 
-local function updatelog(text)
-    pcall(function() setthreadidentity(7) end)
-    local stamp = DateTime.now():FormatLocalTime("HH:mm:ss", "en-us")
-    logs:AppendText(stamp .. " | " .. tostring(text))
-    pcall(function() statusLabel:SetText("Status: " .. tostring(text)) end)
-end
+local filename = logtab:Label({
+    Text = "StratName: " .. env.StratName
+})
 
-local function debugprint(tag, val)
-    local t = typeof(val)
-    if t == "table" then
-        local keys = {}
-        for k in pairs(val) do keys[#keys+1] = tostring(k) end
-        updatelog(string.format("[DEBUG:%s] table keys = {%s}", tostring(tag), table.concat(keys, ", ")))
-    else
-        updatelog(string.format("[DEBUG:%s] %s -> %s", tostring(tag), t, tostring(val)))
-    end
+local logstab = window:CreateTab({
+    Name = "Logs",
+    Visible = true
+})
+
+local loglabel = logtab:Label({
+    Label = "Last Log: Voting"
+})
+
+local row = logstab:Row()
+
+logstab:Separator({
+	Text = "Logs:"
+})
+
+local logs = logstab:Console({
+	Text = "",
+	ReadOnly = true,
+	LineNumbers = false,
+	Border = false,
+	Fill = true,
+	Enabled = true,
+	AutoScroll = true,
+	RichText = true,
+	MaxLines = 200
+})
+
+function updatelog(text: string)
+	setthreadidentity(7)
+	logs:AppendText(DateTime.now():FormatLocalTime("HH:mm:ss", "en-us") .. ":", text)
+	loglabel:SetText("Last Log: " .. text)
 end
 
 window:ShowTab(logtab)
-updatelog("Waiting for Game...")
+updatelog("Voting")
 
-local cachedFolder
-local function GetTowersFolder()
-    if cachedFolder then return cachedFolder end
-    local possible = {
-        workspace:FindFirstChild("Towers"),
-        workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Towers"),
-        workspace:FindFirstChild("Ignore") and workspace.Ignore:FindFirstChild("Towers"),
-        workspace:FindFirstChild("Units"),
-        workspace:FindFirstChild("PlacedTowers")
-    }
-    for _, f in ipairs(possible) do
-        if f then
-            cachedFolder = f
-            updatelog("Found Towers folder: " .. f:GetFullName())
-            return f
-        end
-    end
-    updatelog("Towers folder not found")
-    return nil
-end
-
-local function waitTime(time, wave)
-    while env.waveinfo < wave and not env.isroundover do taskwait(0.1) end
-    while env.timer < time and not env.isroundover do taskwait(0.05) end
-    return not env.isroundover
-end
-
-function api:Start()
-    if towers and towers.SetTimescale and towers.SetTimescale.send then
-        pcall(function() towers.SetTimescale.send(3) end)
-    elseif bytenet.Timescale and bytenet.Timescale.SetTimescale and bytenet.Timescale.SetTimescale.send then
-        pcall(function() bytenet.Timescale.SetTimescale.send(3) end)
-    end
-
-    env.waveinfo = mapinfo:GetAttribute("Wave") or 1
-    env.timer = 0
-    env.TowerMap = {}
-    env.CurrentMacroIndex = 0
-    env.TotalPlacedCount = 0
-    cachedFolder = nil
-
-    mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
-        env.waveinfo = mapinfo:GetAttribute("Wave")
-    end)
-
-    roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
-        env.isroundover = roundresultui.Visible
-    end)
-
-    task.spawn(function()
-        env.lasttime = ostime()
-        while true do
-            env.timer = (ostime() - env.lasttime) * 3
-            taskwait(0.1)
-        end
-    end)
-
-    updatelog("Macro Started")
-end
-
--- safe-call helper
-local function safeCall(fn, ...)
-    if type(fn) ~= "function" then
-        return false, ("fn_not_function")
-    end
-    local ok, res = pcall(fn, ...)
-    return ok, res
-end
-
-function api:Place(tower, position, time, wave)
-    if not waitTime(time, wave) then return end
-
-    env.CurrentMacroIndex = env.CurrentMacroIndex + 1
-    local idx = env.CurrentMacroIndex
-    updatelog(string.format("Placing %s (Step %d)...", tostring(tower), idx))
-
-    local folder = GetTowersFolder()
-    local before = {}
-    if folder then
-        for _, c in ipairs(folder:GetChildren()) do before[c] = true end
-    end
-
-    local finalUID
-    local tries = 0
-
-    repeat
-        if env.isroundover then return end
-
-        local ok, res = safeCall((towers and towers.PlaceTower and towers.PlaceTower.invoke) or nil, {
-            Position = position,
-            Rotation = 0,
-            TowerID = tower
-        })
-
-        debugprint("PlaceReturn", res)
-
-        if ok and type(res) == "number" then
-            finalUID = res
-            updatelog("Place returned numeric UID: " .. tostring(finalUID))
-        elseif ok and type(res) == "table" then
-            finalUID = res.UID or res.uid or res.Id or res.ID
-            if finalUID then updatelog("Place returned table UID: " .. tostring(finalUID)) end
-        end
-
-        if not finalUID and folder then
-            taskwait(0.15)
-            for _, c in ipairs(folder:GetChildren()) do
-                if not before[c] then
-                    local found = tonumber(c.Name) or (c.GetAttribute and c:GetAttribute("UID")) or (c:FindFirstChild("UID") and c.UID.Value)
-                    if type(found) == "number" then
-                        finalUID = found
-                        updatelog("Detected new instance in workspace, UID: " .. tostring(finalUID))
-                        break
-                    else
-                        -- if count increased and we couldn't find a UID, accept heuristic
-                        if #folder:GetChildren() > (table.maxn(before) or 0) then
-                            env.TotalPlacedCount = env.TotalPlacedCount + 1
-                            finalUID = env.TotalPlacedCount
-                            updatelog("Heuristic placement: assigned fake UID: " .. tostring(finalUID))
-                            break
-                        end
-                    end
-                end
-            end
-        end
-
-        if not finalUID then
-            tries = tries + 1
-            if tries > 4 then
-                env.TotalPlacedCount = env.TotalPlacedCount + 1
-                finalUID = env.TotalPlacedCount
-                updatelog("Blind fallback used, assigned UID: " .. tostring(finalUID))
-                break
-            end
-            taskwait(0.25)
-        end
-    until finalUID
-
-    env.TowerMap[idx] = finalUID
-    updatelog(string.format("Placed %s UID=%s", tostring(tower), tostring(finalUID)))
-end
-
-function api:Upgrade(towerIndex, time, wave)
-    if not waitTime(time, wave) then return end
-
-    local uid = env.TowerMap[towerIndex] or towerIndex
-    updatelog("Upgrading UID=" .. tostring(uid))
-
-    local attempts = {
-        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.invoke, arg = uid },
-        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.invoke, arg = { UID = uid } },
-        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.send, arg = uid },
-        { fn = towers and towers.UpgradeTower and towers.UpgradeTower.send, arg = { UID = uid } },
-        -- fallback to bytenet style variations
-        { fn = bytenet and bytenet.UpgradeTower and bytenet.UpgradeTower.invoke, arg = uid },
-        { fn = bytenet and bytenet.UpgradeTower and bytenet.UpgradeTower.invoke, arg = { UID = uid } }
-    }
-
-    for i, at in ipairs(attempts) do
-        if env.isroundover then return end
-        local fn = at.fn
-        local arg = at.arg
-        if type(fn) ~= "function" then
-            debugprint("UpgradeAttempt"..i, "fn_missing")
-        else
-            local ok, res
-            if type(arg) == "table" then
-                ok, res = safeCall(fn, arg)
-            else
-                ok, res = safeCall(fn, arg)
-            end
-            debugprint("UpgradeAttempt"..i, res)
-            if ok and (res == nil or res == true or (type(res) == "table" and (res.Success == true or res.success == true))) then
-                updatelog("Upgrade Success UID=" .. tostring(uid))
-                return
-            end
-        end
-        taskwait(0.12)
-    end
-
-    updatelog("Upgrade FAILED UID=" .. tostring(uid))
-end
-
-function api:SetTarget(towerIndex, target, time, wave)
-    if not waitTime(time, wave) then return end
-    local uid = env.TowerMap[towerIndex] or towerIndex
-    local args = { UID = uid, TargetMode = target }
-    if towers and towers.SetTargetMode and towers.SetTargetMode.send then
-        pcall(function() towers.SetTargetMode.send(args) end)
-    elseif towers and towers.SetTargetMode and towers.SetTargetMode.invoke then
-        pcall(function() towers.SetTargetMode.invoke(args) end)
-    else
-        pcall(function() bytenet.Towers.SetTargetMode.send(args) end)
-    end
-end
-
-function api:Sell(towerIndex, time, wave)
-    if not waitTime(time, wave) then return end
-    local uid = env.TowerMap[towerIndex] or towerIndex
-    if towers and towers.SellTower and towers.SellTower.invoke then
-        pcall(function() towers.SellTower.invoke(uid) end)
-    elseif towers and towers.SellTower and towers.SellTower.send then
-        pcall(function() towers.SellTower.send(uid) end)
-    else
-        pcall(function() bytenet.Towers.SellTower.invoke(uid) end)
-    end
-    updatelog("Sold UID=" .. tostring(uid))
+function waitTime(time, wave)
+	while waveinfo < wave and not isroundover do
+		taskwait(0.05)
+	end
+	   
+    	while timer < time and not isroundover do
+        	taskwait(0.05)
+    	end
+    	
+    	return not isroundover
 end
 
 function api:Loop(func)
-    while taskwait(0.03) do func() end
+	if game.PlaceId ~= 124069847780670 then return end 
+	
+	while taskwait(0.03) do				
+		func()
+	end
+end
+
+function api:Start()
+	bytenet.Timescale.SetTimescale.send(2)
+
+	env.waveinfo = mapinfo:GetAttribute("Wave") or 1
+	env.timer = 0
+	
+	mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
+		env.waveinfo = mapinfo:GetAttribute("Wave")
+	end)
+
+	roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
+		isroundover = roundresultui.Visible
+	end)
+	
+	updatelog("Game Started")
+		
+	task.spawn(function()
+		lasttime = ostime()
+		while env.lasttime do
+			env.timer = (ostime() - env.lasttime) * 2
+			--print(string.format("Timer: %.1f | Wave: %d", timer, waveinfo))
+			
+			taskwait(0.25)
+		end
+	end)
+end
+
+function api:Difficulty(diff: string)
+	updatelog(`Voted difficulty {diff}`)
+	bytenet.DifficultyVote.Vote.send(diff)
+	
+	while #mapinfo:GetAttribute("Difficulty") == 0 do taskwait(0.05) end 
+	
+	env.lasttime = ostime()
+	env.timer = 0
+	env.waveinfo = 1
+	
+	taskwait(0.1)
+end
+
+function api:Ready(time: number, wave: number)
+	if waitTime(time, wave) then updatelog("Sent ready vote") bytenet.ReadyVote.Vote.send(true) end
+end
+
+function api:Skip(time: number, wave: number)
+	if waitTime(time, wave) then updatelog(`Skipping Wave {wave}`) replicatedstorage:WaitForChild("ByteNetReliable"):FireServer(buffer.fromstring("\148\001")) end
+end
+
+function api:AutoSkip(enable: number, time: number, wave: number)
+	if waitTime(time, wave) then updatelog(`AutoSkip set to {tostring(enable)}`) bytenet.SkipWave.ToggleAutoSkip.send(enable) end
+end
+
+function api:Place(tower: string, position: Vector3, time: number, wave: number)
+	if waitTime(time, wave) then	
+		env.totalplacedtowers = env.totalplacedtowers + 1
+		
+		updatelog(`Placed Tower {tower}`)
+		towers.PlaceTower.invoke({["Position"] = position, ["Rotation"] = 0, ["TowerID"] = tower})
+	end
+end
+
+function api:Upgrade(tower, targetLevel, time, wave)
+    if waitTime(time, wave) then
+        local realindex = firsttower + (tower - 1)
+        local currentSuccess = false
+        
+        -- Simple retry loop (optional, but ensures "Upgrade IS the matching level")
+        -- Note: You might want to add a timeout or max retries to prevent infinite freezing if you never get money.
+        repeat
+            local result = towers.UpgradeTower.invoke(realindex)
+            
+            if typeof(result) == "table" then
+                if result.Success then
+                    -- Check if we reached the desired level
+                    if result.Level == targetLevel then
+                        updatelog(`Upgraded Tower {tower} to Level {result.Level}`)
+                        currentSuccess = true
+                    else
+                        -- Upgrade worked, but we aren't at the target level yet? (Rare, but handles potential lag/desync)
+                        updatelog(`Tower {tower} is Level {result.Level}, waiting for {targetLevel}...`)
+                    end
+                else
+                    -- Failed (usually No Money). Wait a bit and try again?
+                    -- Remove the task.wait if you want it to only try once and move on.
+                    updatelog(`Upgrade Failed ({result.FailReason}). Retrying...`)
+                    taskwait(0.5) 
+                end
+            end
+        until currentSuccess or isroundover
+    end
+end
+
+function api:SetTarget(tower: number, target: string, time: number, wave: number)
+	if waitTime(time, wave) then
+		updatelog(`Changed Tower {tower} Target to {target} `)
+	
+		local realindex = firsttower + (tower - 1)
+		towers.SetTargetMode.send({["UID"] = (realindex), ["TargetMode"] = target})
+	end
+end
+
+function api:Sell(tower: number, time: number, wave: number)
+	if waitTime(time, wave) then
+		updatelog(`Sold Tower {tower}`) 
+		
+		local realindex = firsttower + (tower - 1)
+		towers.SellTower.invoke(realindex)
+	end
 end
 
 function api:PlayAgain()
-    while not env.isroundover do taskwait(0.1) end
-    env.lasttime = ostime()
-    env.timer = 0
-    env.waveinfo = 1
-    taskwait(1)
-    if bytenet and bytenet.RoundResult and bytenet.RoundResult.VoteForRestart and bytenet.RoundResult.VoteForRestart.send then
-        pcall(function() bytenet.RoundResult.VoteForRestart.send(true) end)
-    end
-    updatelog("Restart requested")
+	while not isroundover do taskwait(0.1) end
+	
+	env.firsttower = env.totalplacedtowers + 1
+	
+	env.lasttime = ostime()
+	env.timer = 0
+	env.waveinfo = 1
+	
+	taskwait(1)
+	
+	bytenet.RoundResult.VoteForRestart.send(true)
+	updatelog("Voted for restart")
+	--print('vote restart success:')
 end
 
 return api
