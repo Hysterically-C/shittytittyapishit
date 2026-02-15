@@ -1,3 +1,4 @@
+-- API 
 local replicatedstorage = game:GetService("ReplicatedStorage")
 
 local library = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'))()
@@ -7,45 +8,73 @@ local api = {}
 
 local FAST_WAIT = 0.03
 
+local actionState = {}
+local runningActions = {}
+
+local function makeKey(name, ...)
+    local parts = { name }
+    local n = select("#", ...)
+    for i = 1, n do
+        parts[#parts + 1] = tostring(select(i, ...))
+    end
+    return table.concat(parts, "|")
+end
+
+local function scheduleOnce(name, fn, ...)
+    local key = makeKey(name, ...)
+    if actionState[key] or runningActions[key] then return end
+    runningActions[key] = true
+    task.spawn(function()
+        local ok, err = pcall(fn)
+        if not ok then
+            if typeof(updatelog) == "function" then
+                updatelog("Action error: " .. tostring(name) .. " - " .. tostring(err))
+            end
+        end
+        runningActions[key] = nil
+        actionState[key] = true
+    end)
+end
+
 function api:Loadout(towers)
-	if game.PlaceId ~= 98936097545088 then return end
-	for i = 1, #towers do
-		local attempt = 0
-		while true do
-			if env and env.isroundover then return end
-			attempt = attempt + 1
-			local ok, res = pcall(function()
-				return bytenet.Inventory.EquipTower.invoke({["TowerID"] = towers[i], ["Slot"] = i})
-			end)
-			if ok then
-				updatelog("Loadout: Equipped " .. tostring(towers[i]) .. " (slot " .. tostring(i) .. ") after " .. tostring(attempt) .. " attempt(s)")
-				break
-			else
-				updatelog("Loadout: Equip failed for " .. tostring(towers[i]) .. " attempt " .. tostring(attempt) .. " - retrying")
-				task.wait(FAST_WAIT)
-			end
-		end
-		task.wait(FAST_WAIT)
-	end
+    if game.PlaceId ~= 98936097545088 then return end
+    for i = 1, #towers do
+        local attempt = 0
+        while true do
+            if env and env.isroundover then return end
+            attempt = attempt + 1
+            local ok, res = pcall(function()
+                return bytenet.Inventory.EquipTower.invoke({ ["TowerID"] = towers[i], ["Slot"] = i })
+            end)
+            if ok then
+                updatelog("Loadout: Equipped " .. tostring(towers[i]) .. " (slot " .. tostring(i) .. ") after " .. tostring(attempt) .. " attempt(s)")
+                break
+            else
+                updatelog("Loadout: Equip failed for " .. tostring(towers[i]) .. " attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+        task.wait(FAST_WAIT)
+    end
 end
 
 function api:Map(map, modifiers)
-	if game.PlaceId ~= 98936097545088 then return end
-	local attempt = 0
-	while true do
-		if env and env.isroundover then return end
-		attempt = attempt + 1
-		local ok, res = pcall(function()
-			return bytenet.MatchmakingNew.CreateSingleplayer.invoke({["Gamemode"] = "Standard", ["MapID"] = map, ["Modifiers"] = modifiers})
-		end)
-		if ok then
-			updatelog("Map: Created singleplayer match for " .. tostring(map) .. " after " .. tostring(attempt) .. " attempt(s)")
-			break
-		else
-			updatelog("Map: CreateSingleplayer failed attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+    if game.PlaceId ~= 98936097545088 then return end
+    local attempt = 0
+    while true do
+        if env and env.isroundover then return end
+        attempt = attempt + 1
+        local ok, res = pcall(function()
+            return bytenet.MatchmakingNew.CreateSingleplayer.invoke({ ["Gamemode"] = "Standard", ["MapID"] = map, ["Modifiers"] = modifiers })
+        end)
+        if ok then
+            updatelog("Map: Created singleplayer match for " .. tostring(map) .. " after " .. tostring(attempt) .. " attempt(s)")
+            break
+        else
+            updatelog("Map: CreateSingleplayer failed attempt " .. tostring(attempt) .. " - retrying")
+            task.wait(FAST_WAIT)
+        end
+    end
 end
 
 if game.PlaceId ~= 124069847780670 then return api end
@@ -64,14 +93,13 @@ env.lasttime = ostime()
 env.waveinfo = 1
 env.isroundover = false
 env.totalplacedtowers = 0
-env.firsttower = 1
 env.destroyui = false
 
 local window = library:CreateWindow({
-	Title = "Shitty X",
-	Size = UDim2.new(0, 350, 0, 370),
-	Position = UDim2.new(0.5, 0, 0, 70),
-	NoResize = false
+    Title = "Shitty X",
+    Size = UDim2.new(0, 350, 0, 370),
+    Position = UDim2.new(0.5, 0, 0, 70),
+    NoResize = false
 })
 window:Center()
 
@@ -85,243 +113,278 @@ local row = logstab:Row()
 logstab:Separator({ Text = "Logs:" })
 
 local logs = logstab:Console({
-	Text = "",
-	ReadOnly = true,
-	LineNumbers = false,
-	Border = false,
-	Fill = true,
-	Enabled = true,
-	AutoScroll = true,
-	RichText = true,
-	MaxLines = 200
+    Text = "",
+    ReadOnly = true,
+    LineNumbers = false,
+    Border = false,
+    Fill = true,
+    Enabled = true,
+    AutoScroll = true,
+    RichText = true,
+    MaxLines = 200
 })
 
 function updatelog(text)
-	setthreadidentity(7)
-	logs:AppendText(DateTime.now():FormatLocalTime("HH:mm:ss", "en-us") .. ": " .. tostring(text))
-	loglabel:SetText("Last Log: " .. tostring(text))
+    pcall(function()
+        setthreadidentity(7)
+        if logs then
+            logs:AppendText(DateTime.now():FormatLocalTime("HH:mm:ss", "en-us") .. ": " .. tostring(text))
+        end
+        if loglabel then
+            loglabel:SetText("Last Log: " .. tostring(text))
+        end
+    end)
 end
 
 window:ShowTab(logtab)
 updatelog("Voting")
 
--- waitTime still available if you want to poll externally, but actions no longer call it.
-function waitTime(time, wave)
-	while env.waveinfo < wave and not env.isroundover do
-		task.wait(FAST_WAIT)
-	end
-	while env.timer < time and not env.isroundover do
-		task.wait(FAST_WAIT)
-	end
-	return not env.isroundover
+local function waitUntil(time, wave)
+    time = time or 0
+    wave = wave or 0
+    while not env.isroundover and (env.waveinfo < wave or env.timer < time) do
+        task.wait(FAST_WAIT)
+    end
+    return not env.isroundover
 end
 
 function api:Loop(func)
-	if game.PlaceId ~= 124069847780670 then return end
-	while task.wait(FAST_WAIT) do
-		func()
-	end
+    if game.PlaceId ~= 124069847780670 then return end
+    while task.wait(FAST_WAIT) do
+        func()
+    end
 end
 
 function api:Start()
-	bytenet.Timescale.SetTimescale.send(3)
-	env.waveinfo = mapinfo:GetAttribute("Wave") or 1
-	env.timer = 0
-	mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
-		env.waveinfo = mapinfo:GetAttribute("Wave")
-	end)
-	roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
-		env.isroundover = roundresultui.Visible
-	end)
-	updatelog("Game Started")
-	task.spawn(function()
-		env.lasttime = ostime()
-		while env.lasttime do
-			env.timer = (ostime() - env.lasttime) * 3
-			task.wait(0.25)
-		end
-	end)
+    bytenet.Timescale.SetTimescale.send(3)
+    env.waveinfo = mapinfo:GetAttribute("Wave") or 1
+    env.timer = 0
+    mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
+        env.waveinfo = mapinfo:GetAttribute("Wave")
+    end)
+    roundresultui:GetPropertyChangedSignal("Visible"):Connect(function()
+        env.isroundover = roundresultui.Visible
+    end)
+    updatelog("Game Started")
+    task.spawn(function()
+        env.lasttime = ostime()
+        while env.lasttime do
+            env.timer = (ostime() - env.lasttime) * 3
+            task.wait(0.25)
+        end
+    end)
 end
 
 function api:Difficulty(diff)
-	updatelog("Voted difficulty " .. tostring(diff))
-	bytenet.DifficultyVote.Vote.send(diff)
-
-	-- original replay behavior: wait until the server writes the Difficulty attribute
-	while #mapinfo:GetAttribute("Difficulty") == 0 do
-		task.wait(0.05)
-	end
-
-	env.lasttime = ostime()
-	env.timer = 0
-	env.waveinfo = 1
-
-	task.wait(0.1)
+    scheduleOnce("Difficulty", function()
+        if not waitUntil(0, 0) then return end
+        updatelog("Voted difficulty " .. tostring(diff))
+        bytenet.DifficultyVote.Vote.send(diff)
+        while #mapinfo:GetAttribute("Difficulty") == 0 do
+            task.wait(0.05)
+        end
+        env.lasttime = ostime()
+        env.timer = 0
+        env.waveinfo = 1
+        task.wait(0.1)
+    end, diff)
 end
 
--- IMPORTANT: actions below NO LONGER block on wave/time. They start immediately and retry until success.
 function api:Ready(time, wave)
-	local attempt = 0
-	while not env.isroundover do
-		attempt = attempt + 1
-		local ok, err = pcall(function() bytenet.ReadyVote.Vote.send(true) end)
-		if ok then
-			updatelog("Sent ready vote after " .. tostring(attempt) .. " attempt(s)")
-			break
-		else
-			updatelog("Ready vote failed attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+    scheduleOnce("Ready", function()
+        if not waitUntil(time, wave) then return end
+        local attempt = 0
+        while not env.isroundover do
+            attempt = attempt + 1
+            local ok = pcall(function()
+                bytenet.ReadyVote.Vote.send(true)
+            end)
+            if ok then
+                updatelog("Sent ready vote after " .. tostring(attempt) .. " attempt(s)")
+                break
+            else
+                updatelog("Ready vote failed attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end, time or 0, wave or 0)
 end
 
 function api:Skip(time, wave)
-	local attempt = 0
-	while not env.isroundover do
-		attempt = attempt + 1
-		local ok, err = pcall(function() replicatedstorage:WaitForChild("ByteNetReliable"):FireServer(buffer.fromstring("\148\001")) end)
-		if ok then
-			updatelog("Skip sent after " .. tostring(attempt) .. " attempt(s)")
-			break
-		else
-			updatelog("Skip failed attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+    scheduleOnce("Skip", function()
+        if not waitUntil(time, wave) then return end
+        local attempt = 0
+        while not env.isroundover do
+            attempt = attempt + 1
+            local ok = pcall(function()
+                replicatedstorage:WaitForChild("ByteNetReliable"):FireServer(buffer.fromstring("\148\001"))
+            end)
+            if ok then
+                updatelog("Skip sent after " .. tostring(attempt) .. " attempt(s)")
+                break
+            else
+                updatelog("Skip failed attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end, time or 0, wave or 0)
 end
 
 function api:AutoSkip(enable, time, wave)
-	local attempt = 0
-	while not env.isroundover do
-		attempt = attempt + 1
-		local ok, err = pcall(function() bytenet.SkipWave.ToggleAutoSkip.send(enable) end)
-		if ok then
-			updatelog("AutoSkip set to " .. tostring(enable) .. " after " .. tostring(attempt) .. " attempt(s)")
-			break
-		else
-			updatelog("AutoSkip failed attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+    scheduleOnce("AutoSkip", function()
+        if not waitUntil(time, wave) then return end
+        local attempt = 0
+        while not env.isroundover do
+            attempt = attempt + 1
+            local ok = pcall(function()
+                bytenet.SkipWave.ToggleAutoSkip.send(enable)
+            end)
+            if ok then
+                updatelog("AutoSkip set to " .. tostring(enable) .. " after " .. tostring(attempt) .. " attempt(s)")
+                break
+            else
+                updatelog("AutoSkip failed attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end, tostring(enable), time or 0, wave or 0)
 end
 
 function api:Place(tower, position, time, wave)
-	env.totalplacedtowers = env.totalplacedtowers + 1
-	local attempt = 0
-	while not env.isroundover do
-		attempt = attempt + 1
-		local ok, res = pcall(function()
-			return towers.PlaceTower.invoke({["Position"] = position, ["Rotation"] = 0, ["TowerID"] = tower})
-		end)
-		if ok then
-			if type(res) == "table" then
-				if res.Success == true then
-					updatelog("Placed Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
-					break
-				else
-					updatelog("Place returned failure; retrying (attempt " .. tostring(attempt) .. ")")
-					task.wait(FAST_WAIT)
-				end
-			else
-				updatelog("Placed Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
-				break
-			end
-		else
-			updatelog("Place invocation error attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+    env.totalplacedtowers = env.totalplacedtowers + 1
+    local px, py, pz = position.X, position.Y, position.Z
+    scheduleOnce("Place", function()
+        if not waitUntil(time, wave) then return end
+        local attempt = 0
+        while not env.isroundover do
+            attempt = attempt + 1
+            local ok, res = pcall(function()
+                return towers.PlaceTower.invoke({ ["Position"] = position, ["Rotation"] = 0, ["TowerID"] = tower })
+            end)
+            if ok then
+                if type(res) == "table" then
+                    if res.Success == true then
+                        updatelog("Placed Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
+                        break
+                    else
+                        updatelog("Place returned failure; retrying (attempt " .. tostring(attempt) .. ")")
+                        task.wait(FAST_WAIT)
+                    end
+                else
+                    updatelog("Placed Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
+                    break
+                end
+            else
+                updatelog("Place invocation error attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end, tostring(tower), px, py, pz, time or 0, wave or 0)
 end
 
-function api:Upgrade(tower, targetLevel, time, wave)
-	local realindex = env.firsttower + (tower - 1)
-	local attempt = 0
-	while not env.isroundover do
-		attempt = attempt + 1
-		local ok, res = pcall(function()
-			return towers.UpgradeTower.invoke(realindex)
-		end)
-		if ok then
-			if type(res) == "table" then
-				if res.Success == true then
-					if res.Level then
-						updatelog("Upgraded Tower " .. tostring(tower) .. " to Level " .. tostring(res.Level) .. " (attempt " .. tostring(attempt) .. ")")
-						if targetLevel == nil or res.Level == targetLevel then
-							break
-						else
-							task.wait(FAST_WAIT)
-						end
-					else
-						updatelog("Upgraded Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
-						break
-					end
-				else
-					local reason = res.FailReason or "Unknown"
-					updatelog("Upgrade failed (" .. tostring(reason) .. ") attempt " .. tostring(attempt) .. " - retrying")
-					task.wait(FAST_WAIT)
-				end
-			else
-				updatelog("Upgraded Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
-				break
-			end
-		else
-			updatelog("Upgrade invocation error attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+function api:Upgrade(towerIndex, targetLevel, time, wave)
+    scheduleOnce("Upgrade", function()
+        if not waitUntil(time, wave) then return end
+        local attempt = 0
+        while not env.isroundover do
+            attempt = attempt + 1
+            local ok, res = pcall(function()
+                return towers.UpgradeTower.invoke(towerIndex)
+            end)
+            if ok then
+                if type(res) == "table" and res.Success == true then
+                    local lvl = res.Level
+                    if lvl then
+                        updatelog("Upgraded Tower " .. tostring(towerIndex) .. " to Level " .. tostring(lvl) .. " (attempt " .. tostring(attempt) .. ")")
+                        if not targetLevel or lvl >= targetLevel then
+                            break
+                        else
+                            task.wait(FAST_WAIT)
+                        end
+                    else
+                        updatelog("Upgraded Tower " .. tostring(towerIndex) .. " (attempt " .. tostring(attempt) .. ")")
+                        break
+                    end
+                else
+                    local reason = (type(res) == "table" and res.FailReason) or "Unknown"
+                    updatelog("Upgrade failed (" .. tostring(reason) .. ") attempt " .. tostring(attempt) .. " - retrying")
+                    task.wait(FAST_WAIT)
+                end
+            else
+                updatelog("Upgrade invocation error attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end, towerIndex, targetLevel or 0, time or 0, wave or 0)
 end
 
-function api:SetTarget(tower, target, time, wave)
-	local realindex = env.firsttower + (tower - 1)
-	local attempt = 0
-	while not env.isroundover do
-		attempt = attempt + 1
-		local ok, err = pcall(function() towers.SetTargetMode.send({["UID"] = (realindex), ["TargetMode"] = target}) end)
-		if ok then
-			updatelog("Changed Tower " .. tostring(tower) .. " Target to " .. tostring(target) .. " (attempt " .. tostring(attempt) .. ")")
-			break
-		else
-			updatelog("SetTarget failed attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+function api:SetTarget(uid, target, time, wave)
+    scheduleOnce("SetTarget", function()
+        if not waitUntil(time, wave) then return end
+        local attempt = 0
+        while not env.isroundover do
+            attempt = attempt + 1
+            local ok = pcall(function()
+                towers.SetTargetMode.send({ ["UID"] = uid, ["TargetMode"] = target })
+            end)
+            if ok then
+                updatelog("Changed Tower UID " .. tostring(uid) .. " Target to " .. tostring(target) .. " (attempt " .. tostring(attempt) .. ")")
+                break
+            else
+                updatelog("SetTarget failed attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end, uid, target, time or 0, wave or 0)
 end
 
-function api:Sell(tower, time, wave)
-	local realindex = env.firsttower + (tower - 1)
-	local attempt = 0
-	while not env.isroundover do
-		attempt = attempt + 1
-		local ok, res = pcall(function() return towers.SellTower.invoke(realindex) end)
-		if ok then
-			updatelog("Sold Tower " .. tostring(tower) .. " (attempt " .. tostring(attempt) .. ")")
-			break
-		else
-			updatelog("Sell failed attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+function api:Sell(towerIndex, time, wave)
+    scheduleOnce("Sell", function()
+        if not waitUntil(time, wave) then return end
+        local attempt = 0
+        while not env.isroundover do
+            attempt = attempt + 1
+            local ok, res = pcall(function()
+                return towers.SellTower.invoke(towerIndex)
+            end)
+            if ok then
+                updatelog("Sold Tower " .. tostring(towerIndex) .. " (attempt " .. tostring(attempt) .. ")")
+                break
+            else
+                updatelog("Sell failed attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end, towerIndex, time or 0, wave or 0)
 end
 
 function api:PlayAgain()
-	while not env.isroundover do task.wait(FAST_WAIT) end
-	env.firsttower = env.totalplacedtowers + 1
-	env.lasttime = ostime()
-	env.timer = 0
-	env.waveinfo = 1
-	task.wait(1)
-	local attempt = 0
-	while true do
-		attempt = attempt + 1
-		local ok, err = pcall(function() bytenet.RoundResult.VoteForRestart.send(true) end)
-		if ok then
-			updatelog("Voted for restart after " .. tostring(attempt) .. " attempt(s)")
-			break
-		else
-			updatelog("PlayAgain vote failed attempt " .. tostring(attempt) .. " - retrying")
-			task.wait(FAST_WAIT)
-		end
-	end
+    scheduleOnce("PlayAgain", function()
+        while not env.isroundover do
+            task.wait(FAST_WAIT)
+        end
+        env.lasttime = ostime()
+        env.timer = 0
+        env.waveinfo = 1
+        env.totalplacedtowers = 0
+        actionState = {}
+        runningActions = {}
+        task.wait(1)
+        local attempt = 0
+        while true do
+            attempt = attempt + 1
+            local ok = pcall(function()
+                bytenet.RoundResult.VoteForRestart.send(true)
+            end)
+            if ok then
+                updatelog("Voted for restart after " .. tostring(attempt) .. " attempt(s)")
+                break
+            else
+                updatelog("PlayAgain vote failed attempt " .. tostring(attempt) .. " - retrying")
+                task.wait(FAST_WAIT)
+            end
+        end
+    end)
 end
 
 return api
